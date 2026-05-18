@@ -2,9 +2,11 @@
 
 每天自动监控 **iOS / Android** 的官方版本与功能更新，调用 LLM 生成「带优先级 + 行动建议」的评估报告，分平台推送到飞书 Lark 群。
 
+**日常运维（终端里怎么进目录、手动补跑、看日志、自检是否在跑、管理 launchd）** 见 **[操作指南.md](./操作指南.md)**（第 5 节为自检清单）。
+
 ## 它能告诉你什么
 
-每天早上你会在 Lark 群里看到两条卡片消息（iOS 一条、Android 一条），每条按以下结构组织：
+每天中午前后你会在 Lark 群里收到飞书卡片：**有更新时** iOS / Android 各一条评估卡片；**若双平台都无新条目**，则只推送 **一条**「当日无新信息」摘要。有内容的卡片按以下结构组织：
 
 - **一句话摘要**：今天最重要的事
 - **版本时间线**：Beta / RC / GA 的关键节点
@@ -20,8 +22,8 @@
 ┌─────────────────┐    ┌──────────────┐    ┌──────────────┐    ┌────────────┐
 │ 数据源（RSS）    │ -> │ 去重（本地）  │ -> │ AI 评估       │ -> │ Lark 推送   │
 │ Apple Dev News  │    │ data/        │    │ OpenAI 兼容   │    │ 卡片消息    │
-│ Apple Releases  │    │ seen.json    │    │ JSON 严格模式 │    │ iOS / Android│
-│ Android Dev Blog│    │              │    │              │    │ 各一条      │
+│ Apple Releases  │    │ seen.json    │    │ JSON 严格模式 │    │ 有更新:分平台  │
+│ Android Dev Blog│    │              │    │              │    │ 无新:摘要一条 │
 │ Android Studio  │    │              │    │              │    │            │
 └─────────────────┘    └──────────────┘    └──────────────┘    └────────────┘
 ```
@@ -61,29 +63,44 @@ python main.py --platform ios --dry-run
 python main.py
 ```
 
-### 4. 定时运行
+### 4. 定时运行（每天 12:00 起最多 3 次）
 
-**方式 A：本地 cron（每天早上 9:00 跑一次）**
+逻辑由 `run_daily.sh` 负责：**每天 12:00 跑一次**；若失败则 **13:00、14:00 再各触发一次**（间隔 1 小时）。一旦当天某次跑完全成功，会生成 `logs/run-success-YYYY-MM-DD.flag`，后续触发会直接跳过，**不会重复推送**。
+
+**方式 A：macOS launchd（推荐）**
+
+仓库根目录有 `com.mobile_update_report.daily.plist`（默认 `WorkingDirectory` / 路径为 `/Users/admin/mobile_uptdate_report`，若你放在别的目录请先改 plist 里的三处路径）。安装：
+
+```bash
+cp com.mobile_update_report.daily.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.mobile_update_report.daily.plist
+# 修改 plist 后需 unload 再 load
+```
+
+触发时间使用 **本机系统时区** 的 12:00 / 13:00 / 14:00。若需固定为某一时区，可在 plist 里增加 `EnvironmentVariables` → `TZ`（例如 `Asia/Shanghai`）。
+
+**方式 B：cron（每天 12、13、14 点各调用一次脚本）**
 
 ```bash
 crontab -e
-# 添加这一行（注意把路径替换为你本地的）
-0 9 * * * cd /Users/you/Documents/mobile_uptdate_report && /usr/bin/env -S bash -lc '.venv/bin/python main.py >> run.log 2>&1'
+# 三行路径请改成你本机仓库目录；依赖 run_daily.sh 内的「成功标记」去重
+0 12 * * * /bin/bash /path/to/mobile_uptdate_report/run_daily.sh
+0 13 * * * /bin/bash /path/to/mobile_uptdate_report/run_daily.sh
+0 14 * * * /bin/bash /path/to/mobile_uptdate_report/run_daily.sh
 ```
 
-**方式 B：GitHub Actions（已提供模板）**
+**方式 C：GitHub Actions**
 
-编辑 `.github/workflows/daily.yml`（默认 UTC 00:30 = 北京 08:30），并在仓库 Settings → Secrets 添加：
-
-- `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`
-- `LARK_WEBHOOK_URL`、`LARK_SECRET`
-- 在 Variables 添加 `APP_CONTEXT`
+若你在仓库中自行添加 workflow，请按「12:00 起每小时最多重试到第 3 次」的思路配置多个 `schedule` 或单次 workflow 内判断 `run-success` 标记（本仓库未内置 `daily.yml` 时需自行编写）。
 
 ## 文件结构
 
 ```
 mobile_uptdate_report/
 ├── main.py             # 入口，串联抓取/去重/评估/推送
+├── run_daily.sh        # 定时入口：成功标记 + 写日志
+├── 操作指南.md          # 终端操作说明（手动执行、日志、launchd）
+├── com.mobile_update_report.daily.plist  # launchd 示例（12/13/14 点）
 ├── config.py           # 环境变量加载
 ├── sources.py          # iOS / Android 数据源 RSS 抓取
 ├── analyzer.py         # 调 LLM 做结构化评估
@@ -93,7 +110,6 @@ mobile_uptdate_report/
 │   └── system.md       # AI 评估的 System Prompt（可按需调整）
 ├── data/seen.json      # 已推送过的指纹（自动生成）
 ├── .env.example        # 配置模板
-└── .github/workflows/daily.yml  # 定时任务模板
 ```
 
 ## 输出消息模板（示例）

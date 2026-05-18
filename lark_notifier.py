@@ -169,6 +169,50 @@ def _build_card(platform: str, report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_all_quiet_card() -> dict[str, Any]:
+    """iOS / Android 均无新条目时的单日一条摘要卡片。"""
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": (
+                    "**📭 当日无新信息**\n"
+                    "在配置的回溯窗口内，**iOS** 与 **Android** 数据源均未出现需要去重的新条目，"
+                    "因此没有需要分平台推送的评估内容。"
+                ),
+            },
+        },
+        {
+            "tag": "note",
+            "elements": [{"tag": "plain_text", "content": f"数据检查于 {today} · mobile-update-report"}],
+        },
+    ]
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "grey",
+                "title": {"tag": "plain_text", "content": f"📱 iOS / Android · 当日无新信息 · {today}"},
+            },
+            "elements": elements,
+        },
+    }
+
+
+def _assert_lark_ok(result: dict[str, Any], *, context: str) -> None:
+    code = result.get("code", result.get("StatusCode"))
+    if code is not None:
+        try:
+            c = int(code)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Lark 推送返回无法解析的 code {context} response={result!r}") from exc
+        if c != 0:
+            raise RuntimeError(f"Lark 推送返回错误 {context} response={result!r}")
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 def _post(url: str, body: dict[str, Any]) -> dict[str, Any]:
     resp = requests.post(url, json=body, timeout=15)
@@ -176,9 +220,7 @@ def _post(url: str, body: dict[str, Any]) -> dict[str, Any]:
     return resp.json()
 
 
-def send(platform: str, report: dict[str, Any], dry_run: bool = False) -> None:
-    body = _build_card(platform, report)
-
+def _post_lark_interactive(body: dict[str, Any], *, dry_run: bool, success_log: str) -> None:
     if SETTINGS.lark_secret:
         ts = int(time.time())
         body["timestamp"] = str(ts)
@@ -193,7 +235,16 @@ def send(platform: str, report: dict[str, Any], dry_run: bool = False) -> None:
         raise RuntimeError("缺少 LARK_WEBHOOK_URL，请在 .env 中配置")
 
     result = _post(SETTINGS.lark_webhook_url, body)
-    if result.get("code", result.get("StatusCode", 0)) not in (0, None):
-        logger.warning("Lark 推送返回非 0：%s", result)
-    else:
-        logger.info("Lark 推送成功 platform=%s", platform)
+    _assert_lark_ok(result, context=success_log)
+    logger.info("Lark 推送成功 %s", success_log)
+
+
+def send(platform: str, report: dict[str, Any], dry_run: bool = False) -> None:
+    body = _build_card(platform, report)
+    _post_lark_interactive(body, dry_run=dry_run, success_log=f"platform={platform}")
+
+
+def send_all_quiet_digest(dry_run: bool = False) -> None:
+    """双平台均无新条目时推送一条汇总卡片。"""
+    body = _build_all_quiet_card()
+    _post_lark_interactive(body, dry_run=dry_run, success_log="digest=iOS+Android 当日无新信息")

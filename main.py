@@ -5,6 +5,8 @@
     python main.py --dry-run      # 不真的推 Lark，只在控制台打印
     python main.py --no-dedupe    # 忽略历史去重（首次跑/调试时有用）
     python main.py --platform ios # 只跑 iOS（或 android）
+
+双平台均无新条目时（默认 --platform all）：推送一条「当日无新信息」汇总卡片，不再静默。
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ import sys
 
 from analyzer import analyze
 from config import SETTINGS
-from lark_notifier import send
+from lark_notifier import send, send_all_quiet_digest
 from sources import fetch_android, fetch_ios
 from storage import filter_new, load_seen, save_seen
 
@@ -38,7 +40,8 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def run_platform(name: str, fetch_fn, seen: set[str], no_dedupe: bool, dry_run: bool) -> set[str]:
+def run_platform(name: str, fetch_fn, seen: set[str], no_dedupe: bool, dry_run: bool) -> tuple[set[str], bool]:
+    """处理单个平台。返回 (更新后的 seen, 是否因「无新条目」未发分平台卡片)。"""
     logger.info("===== %s =====", name)
     items = fetch_fn(SETTINGS.lookback_days)
     logger.info("[%s] 抓到 %d 条原始更新", name, len(items))
@@ -56,24 +59,32 @@ def run_platform(name: str, fetch_fn, seen: set[str], no_dedupe: bool, dry_run: 
     )
 
     if report.get("no_update") and not new_items:
-        logger.info("[%s] 无新内容，跳过推送", name)
-        return updated
+        logger.info("[%s] 无新内容，不发分平台卡片", name)
+        if not no_dedupe and not dry_run:
+            save_seen(updated)
+        return updated, True
 
     send(name, report, dry_run=dry_run)
-    return updated
+    if not no_dedupe and not dry_run:
+        save_seen(updated)
+    return updated, False
 
 
 def main() -> int:
     args = parse_args()
     seen = set() if args.no_dedupe else load_seen()
 
-    if args.platform in ("ios", "all"):
-        seen = run_platform("iOS", fetch_ios, seen, args.no_dedupe, args.dry_run)
-    if args.platform in ("android", "all"):
-        seen = run_platform("Android", fetch_android, seen, args.no_dedupe, args.dry_run)
+    ios_quiet: bool | None = None
+    android_quiet: bool | None = None
 
-    if not args.no_dedupe and not args.dry_run:
-        save_seen(seen)
+    if args.platform in ("ios", "all"):
+        seen, ios_quiet = run_platform("iOS", fetch_ios, seen, args.no_dedupe, args.dry_run)
+    if args.platform in ("android", "all"):
+        seen, android_quiet = run_platform("Android", fetch_android, seen, args.no_dedupe, args.dry_run)
+
+    if args.platform == "all" and ios_quiet and android_quiet:
+        logger.info("iOS 与 Android 均无新条目，推送一条「当日无新信息」摘要")
+        send_all_quiet_digest(dry_run=args.dry_run)
 
     return 0
 
