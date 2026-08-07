@@ -23,6 +23,8 @@ def _get_int(key: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class Settings:
+    # local（默认，不调 OpenAI）| openai（可选）| cursor（供 Automations 两阶段流程）
+    ai_provider: str
     openai_api_key: str
     openai_base_url: str
     openai_model: str
@@ -36,6 +38,7 @@ class Settings:
 
 
 SETTINGS = Settings(
+    ai_provider=_get("AI_PROVIDER", "local").lower(),
     openai_api_key=_get("OPENAI_API_KEY"),
     openai_base_url=_get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
     openai_model=_get("OPENAI_MODEL", "gpt-4o-mini"),
