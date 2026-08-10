@@ -1,16 +1,16 @@
-"""程序入口：抓取 -> 去重 -> 评估 -> Lark 推送。
+"""程序入口：抓取 -> 评估 -> Lark 推送。
 
 用法:
     python main.py                     # 本地规则评估后推送（默认，不调 OpenAI）
     python main.py --dry-run           # 不真的推 Lark，只在控制台打印
-    python main.py --no-dedupe         # 忽略历史去重
+    python main.py --no-dedupe         # 不读写 seen.json（仍分析回溯窗口内全部条目）
     python main.py --platform ios      # 只跑 iOS（或 android）
 
 Cursor Automations 两阶段（由 Agent 写影响/建议，不调 OpenAI）:
-    python main.py --dump-pending      # 抓取+去重，写出 data/pending.json
+    python main.py --dump-pending      # 抓取，写出 data/pending.json
     python main.py --push-report PATH  # 读取 Agent 写好的报告 JSON 并推送
 
-双平台均无新条目时（默认 --platform all）：推送一条「当日无新信息」汇总卡片。
+默认对回溯窗口内抓到的全部条目做评估并分平台推送（不再因「无新」发汇总卡或跳过）。
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ from typing import Any
 
 from analyzer import analyze
 from config import DATA_DIR, SETTINGS
-from lark_notifier import send, send_all_quiet_digest
+from lark_notifier import send
 from sources import UpdateItem, fetch_android, fetch_ios
-from storage import filter_new, load_seen, save_seen
+from storage import load_seen, save_seen
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +40,11 @@ PENDING_FILE = os.path.join(DATA_DIR, "pending.json")
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="移动端每日更新监控")
     p.add_argument("--dry-run", action="store_true", help="不实际推送 Lark，仅打印")
-    p.add_argument("--no-dedupe", action="store_true", help="忽略历史去重")
+    p.add_argument(
+        "--no-dedupe",
+        action="store_true",
+        help="不读写 seen.json（评估仍覆盖回溯窗口内全部条目）",
+    )
     p.add_argument(
         "--platform",
         choices=["ios", "android", "all"],
@@ -50,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dump-pending",
         action="store_true",
-        help="仅抓取+去重，写出 data/pending.json（供 Cursor Agent 评估）",
+        help="仅抓取，写出 data/pending.json（供 Cursor Agent 评估）",
     )
     p.add_argument(
         "--push-report",
@@ -60,29 +64,24 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _collect_new(
-    name: str, fetch_fn, seen: set[str], no_dedupe: bool,
-) -> tuple[list[UpdateItem], set[str]]:
+def _collect_all(name: str, fetch_fn) -> list[UpdateItem]:
+    """抓取回溯窗口内全部条目（不做「仅新条目」过滤）。"""
     logger.info("===== %s =====", name)
     items = fetch_fn(SETTINGS.lookback_days)
-    logger.info("[%s] 抓到 %d 条原始更新", name, len(items))
-    if no_dedupe:
-        new_items, updated = items, set(seen)
-        for it in items:
-            updated.add(it.fingerprint())
-    else:
-        new_items, updated = filter_new(items, seen)
-    logger.info("[%s] 新条目 %d 条（去重后）", name, len(new_items))
-    return new_items, updated
+    logger.info("[%s] 抓到 %d 条（回溯 %d 天，全部纳入评估）", name, len(items), SETTINGS.lookback_days)
+    return items
+
+
+def _fingerprints(items: list[UpdateItem]) -> set[str]:
+    return {it.fingerprint() for it in items}
 
 
 def run_platform(
-    name: str, fetch_fn, seen: set[str], no_dedupe: bool, dry_run: bool,
-) -> tuple[set[str], bool, dict[str, Any]]:
-    """处理单个平台。返回 (seen, 是否无新条目, 评估报告)。"""
-    new_items, updated = _collect_new(name, fetch_fn, seen, no_dedupe)
-
-    report = analyze(name, new_items)
+    name: str, fetch_fn, dry_run: bool, no_dedupe: bool,
+) -> None:
+    """抓取回溯窗口内全部条目 → 评估 → 推送。"""
+    items = _collect_all(name, fetch_fn)
+    report = analyze(name, items)
     logger.info(
         "[%s] 评估完成 provider=%s headline=%s items=%d",
         name,
@@ -90,28 +89,21 @@ def run_platform(
         report.get("headline"),
         len(report.get("items", [])),
     )
-
-    if report.get("no_update") and not new_items:
-        logger.info("[%s] 无新条目，稍后决定是否推送卡片", name)
-        if not no_dedupe and not dry_run:
-            save_seen(updated)
-        return updated, True, report
-
     send(name, report, dry_run=dry_run)
     if not no_dedupe and not dry_run:
-        save_seen(updated)
-    return updated, False, report
+        seen = load_seen()
+        seen.update(_fingerprints(items))
+        save_seen(seen)
 
 
 def dump_pending(args: argparse.Namespace) -> int:
-    """抓取+去重，写出 pending.json，不推送、不写 seen（等 push-report）。"""
+    """抓取回溯窗口内全部条目，写出 pending.json，不推送、不写 seen（等 push-report）。"""
     os.makedirs(DATA_DIR, exist_ok=True)
-    seen = set() if args.no_dedupe else load_seen()
     platforms: dict[str, list[dict[str, Any]]] = {}
     fingerprints: list[str] = []
 
     if args.platform in ("ios", "all"):
-        items, _ = _collect_new("iOS", fetch_ios, seen, args.no_dedupe)
+        items = _collect_all("iOS", fetch_ios)
         platforms["iOS"] = [
             {
                 "source": it.source,
@@ -126,7 +118,7 @@ def dump_pending(args: argparse.Namespace) -> int:
         fingerprints.extend(x["fingerprint"] for x in platforms["iOS"])
 
     if args.platform in ("android", "all"):
-        items, _ = _collect_new("Android", fetch_android, seen, args.no_dedupe)
+        items = _collect_all("Android", fetch_android)
         platforms["Android"] = [
             {
                 "source": it.source,
@@ -156,8 +148,12 @@ def dump_pending(args: argparse.Namespace) -> int:
     }
     with open(PENDING_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    logger.info("已写出 %s（iOS=%d Android=%d）", PENDING_FILE,
-                len(platforms.get("iOS", [])), len(platforms.get("Android", [])))
+    logger.info(
+        "已写出 %s（iOS=%d Android=%d）",
+        PENDING_FILE,
+        len(platforms.get("iOS", [])),
+        len(platforms.get("Android", [])),
+    )
     print(PENDING_FILE)
     return 0
 
@@ -173,33 +169,15 @@ def push_report(path: str, dry_run: bool) -> int:
         plat = data.get("platform") or "iOS"
         platforms = {plat: data}
 
-    quiet_flags: dict[str, bool] = {}
     for name, report in platforms.items():
         if not isinstance(report, dict):
             continue
-        items = report.get("items") or []
-        no_update = bool(report.get("no_update", not items))
-        quiet_flags[name] = no_update and not items
-        if quiet_flags[name]:
-            logger.info("[%s] 报告标记无新内容", name)
-            continue
         send(name, report, dry_run=dry_run)
-
-    # 双平台都安静 → 推汇总
-    names = list(platforms.keys())
-    if len(names) >= 2 and all(quiet_flags.get(n, True) for n in names):
-        logger.info("各平台均无新条目，推送「当日无新信息」摘要")
-        send_all_quiet_digest(dry_run=dry_run)
-    else:
-        for name, quiet in quiet_flags.items():
-            if quiet and name in platforms:
-                send(name, platforms[name], dry_run=dry_run)
 
     fps = set(data.get("fingerprints") or [])
     for report in platforms.values():
         if isinstance(report, dict):
             fps.update(report.get("fingerprints") or [])
-    # pending 里的 fingerprint 也接受从同级字段合并
     if not dry_run and fps:
         seen = load_seen()
         seen.update(fps)
@@ -216,30 +194,10 @@ def main() -> int:
     if args.push_report:
         return push_report(args.push_report, dry_run=args.dry_run)
 
-    seen = set() if args.no_dedupe else load_seen()
-
-    ios_quiet: bool | None = None
-    android_quiet: bool | None = None
-    ios_report: dict[str, Any] | None = None
-    android_report: dict[str, Any] | None = None
-
     if args.platform in ("ios", "all"):
-        seen, ios_quiet, ios_report = run_platform("iOS", fetch_ios, seen, args.no_dedupe, args.dry_run)
+        run_platform("iOS", fetch_ios, args.dry_run, args.no_dedupe)
     if args.platform in ("android", "all"):
-        seen, android_quiet, android_report = run_platform(
-            "Android", fetch_android, seen, args.no_dedupe, args.dry_run,
-        )
-
-    if args.platform == "all" and ios_quiet and android_quiet:
-        logger.info("iOS 与 Android 均无新条目，推送一条「当日无新信息」摘要")
-        send_all_quiet_digest(dry_run=args.dry_run)
-    else:
-        if ios_quiet and ios_report is not None and args.platform in ("ios", "all"):
-            logger.info("[iOS] 无新条目，推送「无重要更新」分平台卡片")
-            send("iOS", ios_report, dry_run=args.dry_run)
-        if android_quiet and android_report is not None and args.platform in ("android", "all"):
-            logger.info("[Android] 无新条目，推送「无重要更新」分平台卡片")
-            send("Android", android_report, dry_run=args.dry_run)
+        run_platform("Android", fetch_android, args.dry_run, args.no_dedupe)
 
     return 0
 
