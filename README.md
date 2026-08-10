@@ -97,7 +97,7 @@ crontab -e
 
 ```
 mobile_uptdate_report/
-├── main.py             # 入口，串联抓取/去重/评估/推送
+├── main.py             # 入口，串联抓取/评估/推送
 ├── run_daily.sh        # 定时入口：成功标记 + 写日志
 ├── 操作指南.md          # 终端操作说明（手动执行、日志、launchd）
 ├── com.mobile_update_report.daily.plist  # launchd 示例（12/13/14 点）
@@ -105,10 +105,10 @@ mobile_uptdate_report/
 ├── sources.py          # iOS / Android 数据源 RSS 抓取
 ├── analyzer.py         # 调 LLM 做结构化评估
 ├── lark_notifier.py    # 飞书机器人推送（含加签 + 卡片消息）
-├── storage.py          # 去重存储（data/seen.json）
+├── storage.py          # 指纹记录（data/seen.json，不再用于过滤推送）
 ├── prompts/
 │   └── system.md       # AI 评估的 System Prompt（可按需调整）
-├── data/seen.json      # 已推送过的指纹（自动生成）
+├── data/seen.json      # 已抓取条目指纹（自动生成）
 ├── .env.example        # 配置模板
 ```
 
